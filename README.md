@@ -1,5 +1,59 @@
 # Einsum.jl
 
+This branch leaves `@einsum` alone, but modifies `@einsimd` to use `@avx` from LoopVectorisation.jl. Which is quite impressive:
+
+```julia
+julia> using Einsum, OMEinsum, LoopVectorization, BenchmarkTools
+
+julia> A = rand(100,100); B = rand(100,100);
+
+julia> ein(A,B) = @einsum R[i,k] := A[i,j] * B[j,k];
+
+julia> ein_avx(A,B) = @einsimd R[i,k] := A[i,j] * B[j,k];
+
+julia> @btime ein($A, $B); # simple loops
+  879.677 μs (2 allocations: 78.20 KiB)
+
+julia> @btime ein_avx($A, $B); # @avx magic
+  39.696 μs (2 allocations: 78.20 KiB)
+
+julia> @btime $A * $B; # BLAS
+  43.907 μs (2 allocations: 78.20 KiB)
+
+# Batched matrix multiplication:
+
+julia> X = rand(50,50,50); Y = rand(50,50,50);
+
+julia> bat_ein(X,Y) = @einsum Z[i,k,b] := X[i,j,b] * Y[j,k,b];
+
+julia> bat_ome(X,Y) = @ein Z[i,k,b] := X[i,j,b] * Y[j,k,b];
+
+julia> bat_simd(X,Y) = @einsimd Z[i,k,b] := X[i,j,b] * Y[j,k,b];
+
+julia> @btime bat_ein($X, $Y); # simple loops
+  4.495 ms (2 allocations: 976.64 KiB)
+
+julia> @btime bat_ome($X, $Y); # batched_gemm
+  497.520 μs (228 allocations: 993.03 KiB)
+
+julia> @btime bat_simd($X, $Y); # @avx magic
+  659.300 μs (2 allocations: 976.64 KiB)
+
+# Now try with the indices in a nonstandard order:
+
+julia> bat2_simd(X,Y) = @einsimd Z[i,b,k] := X[i,b,j] * Y[j,b,k];
+
+julia> bat2_ome(X,Y) = @ein Z[i,b,k] := X[i,b,j] * Y[j,b,k];
+
+julia> @btime bat2_simd($X, $Y);
+  612.425 μs (2 allocations: 976.64 KiB)
+
+julia> @btime bat2_ome($X, $Y); # this inserts permutedims
+  909.546 μs (246 allocations: 3.83 MiB)
+```
+
+
+
 | **Package Build** | **Package Status** |
 |:---------:|:------------------:|
 | [![Build Status](https://travis-ci.org/ahwillia/Einsum.jl.svg?branch=master)](https://travis-ci.org/ahwillia/Einsum.jl) | [![License](http://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat)](LICENSE.md) |

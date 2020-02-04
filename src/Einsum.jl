@@ -2,6 +2,17 @@ module Einsum
 
 export @einsum, @einsimd, @vielsum, @vielsimd
 
+#=
+
+In this version, @einsimd instead adds @avx to the outermost loop.
+You must load LoopVectorization before using this.
+
+@vielsimd in fact just adds @avx to the outermost loop too, without @threads.
+However it also accumulates directly in the array, not in a temporary variable.
+Which turns out to make no difference.
+
+=#
+
 macro einsum(ex)
     _einsum(ex) # true, false, false
 end
@@ -160,14 +171,14 @@ function _einsum(expr::Expr, inbounds = true, simd = false, threads = false)
             loop_expr.head = :(+=)
 
             # Nest loops to iterate over the summed out variables
-            loop_expr = nest_loops(loop_expr, rhs_indices, rhs_axis_exprs, simd, false)
+            loop_expr = nest_loops(loop_expr, rhs_indices, rhs_axis_exprs, false, false)
 
             # Prepend with s = 0, and append with assignment
             # to the left hand side of the equation.
             lhs_assignment = Expr(assignment_op, lhs, s)
 
             loop_expr = quote
-                local $s = zero($T)
+                $s = zero($T) # local not req, and breaks @avx
                 $loop_expr
                 $lhs_assignment
             end
@@ -177,7 +188,7 @@ function _einsum(expr::Expr, inbounds = true, simd = false, threads = false)
             loop_expr.args[1] = lhs
             loop_expr.head = :(+=)
 
-            loop_expr = nest_loops(loop_expr, rhs_indices, rhs_axis_exprs, simd, false)
+            loop_expr = nest_loops(loop_expr, rhs_indices, rhs_axis_exprs, false, false)
 
             loop_expr = quote
                 $lhs = zero($T)
@@ -186,14 +197,14 @@ function _einsum(expr::Expr, inbounds = true, simd = false, threads = false)
         end
 
         # Now loop over indices appearing on lhs, if any
-        loop_expr = nest_loops(loop_expr, lhs_indices, lhs_axis_exprs, false, threads)
+        loop_expr = nest_loops(loop_expr, lhs_indices, lhs_axis_exprs, simd, threads)
     else
         # We do not sum over any indices, only loop over lhs
         loop_expr.head = assignment_op
         loop_expr = nest_loops(loop_expr, lhs_indices, lhs_axis_exprs, simd, threads)
     end
 
-    if inbounds
+    if inbounds && !simd # @avx does this by itself
         loop_expr = :(@inbounds $loop_expr)
     end
 
@@ -235,8 +246,7 @@ Construct a nested loop around `expr`, using `indices` in ranges `axis_exprs`.
 ```julia-repl
 julia> nest_loops(:(A[i] = B[i]), [:i], [:(size(A, 1))], true, false)
 quote
-    local i
-    @simd for i = 1:size(A, 1)
+    @avx for i = 1:size(A, 1)
         A[i] = B[i]
     end
 end
@@ -247,15 +257,13 @@ function nest_loops(expr::Expr,
                     simd::Bool, threads::Bool)
     isempty(index_names) && return expr
 
-    # Add @simd to the innermost loop, if required
-    # and @threads to the outermost loop
-    expr = nest_loop(expr, index_names[1], axis_expressions[1],
-                     simd, threads && length(index_names) == 1)
-
-    # Add remaining for loops
-    for j = 2:length(index_names)
+    # Add either @avx or @threads to the outermost loop, if required
+    # expr = nest_loop(expr, index_names[1], axis_expressions[1],
+    #                  simd, threads && length(index_names) == 1)
+    num_loops = length(index_names)
+    for j = 1:num_loops
         expr = nest_loop(expr, index_names[j], axis_expressions[j],
-                         false, threads && length(index_names) == j)
+                         simd && j==num_loops, threads && j==num_loops)
     end
 
     return expr
@@ -267,10 +275,10 @@ function nest_loop(expr::Expr, index_name::Symbol, axis_expression::Expr,
                  $expr
              end)
 
-    if threads
+    if simd
+        return :(LoopVectorization.@avx $loop)
+    elseif threads
         return :(Threads.@threads $loop)
-    elseif simd
-        return :(@simd $loop)
     else
         return loop
     end
